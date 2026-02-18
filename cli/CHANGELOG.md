@@ -1,11 +1,18 @@
 # cline
 
+## 2.4.1
+
+### Patch Changes
+
+- 80dfce0: docs: remove stale Claude 5 mention from auto compact model support list
+- 36c68a6: Remove the expired MiniMax M2.5 free promo, restore GLM 5 free promo in What's New, and keep Sonnet 4.6 free messaging at 24 hours.
+- eb9f53e: Fix infinite retry loop when write_to_file fails with missing content parameter. Provides progressive guidance to the model, escalating from suggestions to hard stops, with context window awareness to break the loop.
 
 ## [2.4.0]
 
 ### Changes
 
-- Adding Anthropic Sonnet 4.6 
+- Adding Anthropic Sonnet 4.6
 
 ## [2.3.0]
 
