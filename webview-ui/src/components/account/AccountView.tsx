@@ -1,7 +1,7 @@
-import { VSCodeButton, VSCodeDivider, VSCodeLink } from "@vscode/webview-ui-toolkit/react"
-import { memo, useEffect, useState } from "react"
-import { useFirebaseAuth } from "@/context/FirebaseAuthContext"
-import { vscode } from "@/utils/vscode"
+import { VSCodeButton, VSCodeDivider, VSCodeLink, VSCodeDropdown, VSCodeOption } from "@vscode/webview-ui-toolkit/react"
+import { memo, useCallback, useEffect, useState } from "react"
+import { BadgeCent } from "lucide-react"
+import { useClineAuth } from "@/context/ClineAuthContext"
 import VSCodeButtonLink from "../common/VSCodeButtonLink"
 import ClineLogoWhite from "../../assets/ClineLogoWhite"
 import CountUp from "react-countup"
@@ -10,6 +10,13 @@ import { UsageTransaction, PaymentTransaction } from "@shared/ClineAccount"
 import { useExtensionState } from "@/context/ExtensionStateContext"
 import { AccountServiceClient } from "@/services/grpc-client"
 import { EmptyRequest } from "@shared/proto/common"
+import { UserOrganization, UserOrganizationUpdateRequest } from "@shared/proto/account"
+
+type VSCodeDropdownChangeEvent = Event & {
+	target: {
+		value: string
+	}
+}
 
 type AccountViewProps = {
 	onDone: () => void
@@ -32,63 +39,114 @@ const AccountView = ({ onDone }: AccountViewProps) => {
 }
 
 export const ClineAccountView = () => {
-	const { user: firebaseUser, handleSignOut } = useFirebaseAuth()
+	const { clineUser, handleSignIn, handleSignOut } = useClineAuth()
 	const { userInfo, apiConfiguration } = useExtensionState()
 
-	let user = apiConfiguration?.clineApiKey ? firebaseUser || userInfo : undefined
+	let user = apiConfiguration?.clineAccountId ? clineUser || userInfo : undefined
 
 	const [balance, setBalance] = useState(0)
+	const [userOrganizations, setUserOrganizations] = useState<UserOrganization[]>([])
+	const [activeOrganization, setActiveOrganization] = useState<UserOrganization | null>(null)
 	const [isLoading, setIsLoading] = useState(true)
+	const [isSwitchingOrg, setIsSwitchingOrg] = useState(false)
 	const [usageData, setUsageData] = useState<UsageTransaction[]>([])
 	const [paymentsData, setPaymentsData] = useState<PaymentTransaction[]>([])
 
-	// Listen for balance and transaction data updates from the extension
-	useEffect(() => {
-		const handleMessage = (event: MessageEvent) => {
-			const message = event.data
-			if (message.type === "userCreditsBalance" && message.userCreditsBalance) {
-				setBalance(message.userCreditsBalance.currentBalance)
-			} else if (message.type === "userCreditsUsage" && message.userCreditsUsage) {
-				setUsageData(message.userCreditsUsage.usageTransactions)
-			} else if (message.type === "userCreditsPayments" && message.userCreditsPayments) {
-				setPaymentsData(message.userCreditsPayments.paymentTransactions)
-			}
+	const dashboardAddCreditsURL = activeOrganization
+		? "https://app.cline.bot/dashboard/organization?tab=credits&redirect=true"
+		: "https://app.cline.bot/dashboard/account?tab=credits&redirect=true"
+
+	async function getUserCredits() {
+		setIsLoading(true)
+		try {
+			const response = await AccountServiceClient.getUserCredits(EmptyRequest.create())
+			setBalance(response.balance?.currentBalance || 0)
+			setUsageData(response.usageTransactions)
+			setPaymentsData(response.paymentTransactions)
+		} catch (error) {
+			console.error("Failed to fetch user credits data:", error)
+			setBalance(0)
+			setUsageData([])
+			setPaymentsData([])
+		} finally {
 			setIsLoading(false)
 		}
+	}
 
-		window.addEventListener("message", handleMessage)
+	async function getUserOrganizations() {
+		setIsLoading(true)
+		try {
+			const response = await AccountServiceClient.getUserOrganizations(EmptyRequest.create())
+			setUserOrganizations(response.organizations || [])
+			setActiveOrganization(response.organizations.find((org: UserOrganization) => org.active) || null)
+		} catch (error) {
+			console.error("Failed to fetch user organizations:", error)
+			setUserOrganizations([])
+			setActiveOrganization(null)
+		} finally {
+			setIsLoading(false)
+		}
+	}
 
-		// Fetch all account data when component mounts
-		if (user) {
-			setIsLoading(true)
-			vscode.postMessage({ type: "fetchUserCreditsData" })
+	// Fetch all account data when component mounts using gRPC
+	useEffect(() => {
+		if (!user) return
+
+		const fetchUserData = async () => {
+			try {
+				Promise.all([getUserCredits(), getUserOrganizations()])
+			} catch (error) {
+				console.error("Failed to fetch user data:", error)
+				setBalance(0)
+				setUsageData([])
+				setPaymentsData([])
+			} finally {
+				setIsLoading(false)
+			}
 		}
 
-		return () => {
-			window.removeEventListener("message", handleMessage)
-		}
+		fetchUserData()
 	}, [user])
 
 	const handleLogin = () => {
-		AccountServiceClient.accountLoginClicked(EmptyRequest.create()).catch((err) =>
-			console.error("Failed to get login URL:", err),
-		)
+		handleSignIn()
 	}
 
 	const handleLogout = () => {
-		// Use gRPC client to notify extension to clear API keys and state
-		AccountServiceClient.accountLogoutClicked(EmptyRequest.create()).catch((err) => console.error("Failed to logout:", err))
-		// Then sign out of Firebase
 		handleSignOut()
 	}
+
+	const handleOrganizationChange = useCallback(
+		async (event: any) => {
+			const newOrgId = (event.target as VSCodeDropdownChangeEvent["target"]).value
+
+			if (activeOrganization?.organizationId !== newOrgId) {
+				setIsSwitchingOrg(true) // Disable dropdown
+
+				try {
+					await AccountServiceClient.setUserOrganization(
+						UserOrganizationUpdateRequest.create({ organizationId: newOrgId }),
+					)
+					await getUserOrganizations() // Refresh to get new active org
+					await getUserCredits() // Refresh credits for new org
+				} catch (error) {
+					console.error("Failed to update organization:", error)
+				} finally {
+					setIsSwitchingOrg(false) // Re-enable dropdown
+				}
+			}
+		},
+		[activeOrganization],
+	)
+
 	return (
 		<div className="h-full flex flex-col">
 			{user ? (
 				<div className="flex flex-col pr-3 h-full">
 					<div className="flex flex-col w-full">
 						<div className="flex items-center mb-6 flex-wrap gap-y-4">
-							{user.photoURL ? (
-								<img src={user.photoURL} alt="Profile" className="size-16 rounded-full mr-4" />
+							{user.photoUrl ? (
+								<img src={user.photoUrl} alt="Profile" className="size-16 rounded-full mr-4" />
 							) : (
 								<div className="size-16 rounded-full bg-[var(--vscode-button-background)] flex items-center justify-center text-2xl text-[var(--vscode-button-foreground)] mr-4">
 									{user.displayName?.[0] || user.email?.[0] || "?"}
@@ -97,7 +155,7 @@ export const ClineAccountView = () => {
 
 							<div className="flex flex-col">
 								{user.displayName && (
-									<h2 className="text-[var(--vscode-foreground)] m-0 mb-1 text-lg font-medium">
+									<h2 className="text-[var(--vscode-foreground)] m-0 text-lg font-medium">
 										{user.displayName}
 									</h2>
 								)}
@@ -105,13 +163,29 @@ export const ClineAccountView = () => {
 								{user.email && (
 									<div className="text-sm text-[var(--vscode-descriptionForeground)]">{user.email}</div>
 								)}
+
+								{userOrganizations && (
+									<VSCodeDropdown
+										key={activeOrganization?.organizationId || "personal"}
+										currentValue={activeOrganization?.organizationId || ""}
+										onChange={handleOrganizationChange}
+										disabled={isSwitchingOrg || isLoading}
+										style={{ width: "100%", marginTop: "4px" }}>
+										<VSCodeOption value="">Personal</VSCodeOption>
+										{userOrganizations.map((org: UserOrganization) => (
+											<VSCodeOption key={org.organizationId} value={org.organizationId}>
+												{org.name}
+											</VSCodeOption>
+										))}
+									</VSCodeDropdown>
+								)}
 							</div>
 						</div>
 					</div>
 
 					<div className="w-full flex gap-2 flex-col min-[225px]:flex-row">
 						<div className="w-full min-[225px]:w-1/2">
-							<VSCodeButtonLink href="https://app.cline.bot/credits" appearance="primary" className="w-full">
+							<VSCodeButtonLink href="https://app.cline.bot/dashboard" appearance="primary" className="w-full">
 								Dashboard
 							</VSCodeButtonLink>
 						</div>
@@ -120,39 +194,47 @@ export const ClineAccountView = () => {
 						</VSCodeButton>
 					</div>
 
-					<VSCodeDivider className="w-full my-6" />
+					{/* Credit balance is not available for organization account */}
+					{activeOrganization === null && <VSCodeDivider className="w-full my-6" />}
 
-					<div className="w-full flex flex-col items-center">
-						<div className="text-sm text-[var(--vscode-descriptionForeground)] mb-3">CURRENT BALANCE</div>
+					{activeOrganization === null && (
+						<div className="w-full flex flex-col items-center">
+							<div className="text-sm text-[var(--vscode-descriptionForeground)] mb-3">CURRENT BALANCE</div>
 
-						<div className="text-4xl font-bold text-[var(--vscode-foreground)] mb-6 flex items-center gap-2">
-							{isLoading ? (
-								<div className="text-[var(--vscode-descriptionForeground)]">Loading...</div>
-							) : (
-								<>
-									<span>$</span>
-									<CountUp end={balance} duration={0.66} decimals={2} />
-									<VSCodeButton
-										appearance="icon"
-										className="mt-1"
-										onClick={() => vscode.postMessage({ type: "fetchUserCreditsData" })}>
-										<span className="codicon codicon-refresh"></span>
-									</VSCodeButton>
-								</>
-							)}
+							<div className="text-4xl font-bold text-[var(--vscode-foreground)] mb-6 flex items-center gap-2">
+								{isLoading ? (
+									<div className="text-[var(--vscode-descriptionForeground)]">Loading...</div>
+								) : (
+									<>
+										<BadgeCent className="size-6 text-[var(--vscode-foreground)]" />
+										{/* TODO: Do this in a more correct way.  We have to divide by 10000
+										 * because the balance is stored in microcredits in the backend.
+										 */}
+										<CountUp end={balance / 10000} duration={0.66} decimals={4} />
+										<VSCodeButton appearance="icon" className="mt-1" onClick={getUserCredits}>
+											<span className="codicon codicon-refresh"></span>
+										</VSCodeButton>
+									</>
+								)}
+							</div>
+
+							<div className="w-full">
+								<VSCodeButtonLink href={dashboardAddCreditsURL} className="w-full">
+									Add Credits
+								</VSCodeButtonLink>
+							</div>
 						</div>
-
-						<div className="w-full">
-							<VSCodeButtonLink href="https://app.cline.bot/credits/#buy" className="w-full">
-								Add Credits
-							</VSCodeButtonLink>
-						</div>
-					</div>
+					)}
 
 					<VSCodeDivider className="mt-6 mb-3 w-full" />
 
 					<div className="flex-grow flex flex-col min-h-0 pb-[0px]">
-						<CreditsHistoryTable isLoading={isLoading} usageData={usageData} paymentsData={paymentsData} />
+						<CreditsHistoryTable
+							isLoading={isLoading}
+							usageData={usageData}
+							paymentsData={paymentsData}
+							showPayments={!activeOrganization}
+						/>
 					</div>
 				</div>
 			) : (
